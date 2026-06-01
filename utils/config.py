@@ -17,6 +17,7 @@ class ProviderConfig:
 	domain: str
 	login_path: str = '/login'
 	sign_in_path: str | None = '/api/user/sign_in'
+	login_api_path: str | None = None
 	user_info_path: str = '/api/user/self'
 	api_user_key: str = 'new-api-user'
 	bypass_method: Literal['waf_cookies'] | None = None
@@ -51,6 +52,7 @@ class ProviderConfig:
 			domain=data['domain'],
 			login_path=data.get('login_path', '/login'),
 			sign_in_path=data.get('sign_in_path', '/api/user/sign_in'),
+			login_api_path=data.get('login_api_path'),
 			user_info_path=data.get('user_info_path', '/api/user/self'),
 			api_user_key=data.get('api_user_key', 'new-api-user'),
 			bypass_method=data.get('bypass_method'),
@@ -64,6 +66,10 @@ class ProviderConfig:
 	def needs_manual_check_in(self) -> bool:
 		"""判断是否需要手动调用签到接口"""
 		return self.sign_in_path is not None
+
+	def needs_login_check_in(self) -> bool:
+		"""判断是否通过登录接口完成签到（如 agentrouter：登录即签到）"""
+		return self.login_api_path is not None
 
 
 @dataclass
@@ -90,11 +96,12 @@ class AppConfig:
 				name='agentrouter',
 				domain='https://agentrouter.org',
 				login_path='/login',
-				sign_in_path=None,  # 无需签到接口，查询用户信息时自动完成签到
+				sign_in_path=None,  # 无独立签到接口（/api/user/sign_in 等均 404）
+				login_api_path='/api/user/login',  # 登录即签到：每次登录触发当日签到
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
-				bypass_method='waf_cookies',
-				waf_cookie_names=['acw_tc'],
+				bypass_method=None,  # pilot：登录接口对住宅 IP 无需 WAF 绕过；若 runner 被 WAF 拦再改回 'waf_cookies'
+				waf_cookie_names=None,
 			),
 		}
 
@@ -135,8 +142,10 @@ class AppConfig:
 class AccountConfig:
 	"""账号配置"""
 
-	cookies: dict | str
-	api_user: str
+	cookies: dict | str | None = None
+	api_user: str | None = None
+	email: str | None = None
+	password: str | None = None
 	provider: str = 'anyrouter'
 	name: str | None = None
 
@@ -146,7 +155,18 @@ class AccountConfig:
 		provider = data.get('provider', 'anyrouter')
 		name = data.get('name', f'Account {index + 1}')
 
-		return cls(cookies=data['cookies'], api_user=data['api_user'], provider=provider, name=name if name else None)
+		return cls(
+			cookies=data.get('cookies'),
+			api_user=data.get('api_user'),
+			email=data.get('email'),
+			password=data.get('password'),
+			provider=provider,
+			name=name if name else None,
+		)
+
+	def has_login_credentials(self) -> bool:
+		"""是否提供了邮箱+密码（用于登录式签到，如 agentrouter）"""
+		return bool(self.email and self.password)
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
@@ -173,8 +193,10 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				print(f'ERROR: Account {i + 1} configuration format is incorrect')
 				return None
 
-			if 'cookies' not in account_dict or 'api_user' not in account_dict:
-				print(f'ERROR: Account {i + 1} missing required fields (cookies, api_user)')
+			has_cookie_auth = 'cookies' in account_dict and 'api_user' in account_dict
+			has_login_auth = bool(account_dict.get('email')) and bool(account_dict.get('password'))
+			if not has_cookie_auth and not has_login_auth:
+				print(f'ERROR: Account {i + 1} missing auth: need (cookies + api_user) or (email + password)')
 				return None
 
 			if 'name' in account_dict and not account_dict['name']:

@@ -256,6 +256,107 @@ def format_check_in_notification(detail: dict) -> str:
 	return '\n'.join(lines)
 
 
+def execute_login_check_in(client, account_name: str, provider_config, email: str, password: str):
+	"""通过登录完成签到（如 agentrouter：每次登录触发当日签到）
+
+	返回 (success, user_data)。user_data 为登录响应的 data 字段（含 id、checked_in、quota 等）。
+	登录成功后 session cookie 会被 httpx 自动写入 client。
+	"""
+	print(f'[NETWORK] {account_name}: Logging in to trigger check-in')
+
+	login_url = f'{provider_config.domain}{provider_config.login_api_path}'
+	login_headers = {
+		'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+		'Accept': 'application/json, text/plain, */*',
+		'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+		'Content-Type': 'application/json',
+		'X-Requested-With': 'XMLHttpRequest',
+		'Referer': f'{provider_config.domain}{provider_config.login_path}',
+		'Origin': provider_config.domain,
+	}
+
+	try:
+		response = client.post(
+			login_url, headers=login_headers, json={'username': email, 'password': password}, timeout=30
+		)
+	except Exception as e:
+		print(f'[FAILED] {account_name}: Login request error - {str(e)[:80]}')
+		return False, None
+
+	print(f'[RESPONSE] {account_name}: Login status code {response.status_code}')
+
+	if response.status_code != 200:
+		print(f'[FAILED] {account_name}: Login failed - HTTP {response.status_code}')
+		return False, None
+
+	try:
+		result = response.json()
+	except json.JSONDecodeError:
+		snippet = response.text[:120].replace('\n', ' ')
+		print(f'[FAILED] {account_name}: Login returned non-JSON (likely WAF challenge): {snippet}')
+		return False, None
+
+	if result.get('success'):
+		data = result.get('data') or {}
+		checked_in = data.get('checked_in')
+		ci = 'unknown' if checked_in is None else checked_in
+		print(f'[SUCCESS] {account_name}: Login OK (id={data.get("id")}, checked_in={ci}) - check-in triggered')
+		return True, data
+
+	error_msg = result.get('message') or result.get('msg') or 'Unknown error'
+	print(f'[FAILED] {account_name}: Login failed - {error_msg}')
+	return False, None
+
+
+async def login_check_in_flow(account: AccountConfig, account_name: str, provider_config):
+	"""登录式签到流程：登录触发签到 → 读取余额（agentrouter）"""
+	waf_cookies = {}
+	if provider_config.needs_waf_cookies():
+		login_url = f'{provider_config.domain}{provider_config.login_path}'
+		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url, provider_config.waf_cookie_names)
+		if not waf_cookies:
+			print(f'[FAILED] {account_name}: Unable to get WAF cookies')
+			return False, None, None
+
+	client = httpx.Client(http2=True, timeout=30.0)
+	try:
+		if waf_cookies:
+			client.cookies.update(waf_cookies)
+
+		success, user_data = execute_login_check_in(
+			client, account_name, provider_config, account.email, account.password
+		)
+		if not success:
+			return False, None, None
+
+		# 登录响应已带回 session cookie；用响应中的 id 作为 new-api-user 读取余额
+		api_user = str((user_data or {}).get('id') or account.api_user or '')
+		headers = {
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+			'Accept': 'application/json, text/plain, */*',
+			'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+			'Referer': provider_config.domain,
+			'Origin': provider_config.domain,
+		}
+		if api_user:
+			headers[provider_config.api_user_key] = api_user
+
+		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
+		user_info = get_user_info(client, headers, user_info_url)
+		if user_info and user_info.get('success'):
+			print(user_info['display'])
+		elif user_info:
+			print(user_info.get('error', 'Unknown error'))
+
+		# 登录即已签到，签到前后视为同一状态
+		return True, user_info, user_info
+	except Exception as e:
+		print(f'[FAILED] {account_name}: Error during login check-in - {str(e)[:60]}')
+		return False, None, None
+	finally:
+		client.close()
+
+
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
 	"""为单个账号执行签到操作"""
 	account_name = account.get_display_name(account_index)
@@ -267,6 +368,10 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return False, None
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
+
+	# 登录式签到（如 agentrouter）：用邮箱+密码登录，登录即触发当日签到
+	if provider_config.needs_login_check_in() and account.has_login_credentials():
+		return await login_check_in_flow(account, account_name, provider_config)
 
 	user_cookies = parse_cookies(account.cookies)
 	if not user_cookies:
