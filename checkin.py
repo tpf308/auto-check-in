@@ -65,8 +65,12 @@ def parse_cookies(cookies_data):
 	return {}
 
 
-async def get_waf_cookies_with_playwright(account_name: str, login_url: str, required_cookies: list[str]):
-	"""使用 Playwright 获取 WAF cookies（隐私模式）"""
+async def get_waf_cookies_with_playwright(account_name: str, login_url: str, required_cookies, probe_urls: list[str] | None = None):
+	"""使用 Playwright 获取 WAF cookies（隐私模式）
+
+	required_cookies 为 None 时返回浏览器全部 cookie。probe_urls 用于登录式签到：
+	额外导航到这些 URL（通常是被 WAF 拦的 /api 路径），触发并让浏览器解出 acw_sc__v2 等挑战 cookie。
+	"""
 	print(f'[PROCESSING] {account_name}: Starting browser to get WAF cookies...')
 
 	async with async_playwright() as p:
@@ -98,6 +102,14 @@ async def get_waf_cookies_with_playwright(account_name: str, login_url: str, req
 					await page.wait_for_function('document.readyState === "complete"', timeout=5000)
 				except Exception:
 					await page.wait_for_timeout(3000)
+
+				for probe in (probe_urls or []):
+					try:
+						print(f'[PROCESSING] {account_name}: Probing {probe} to trigger/solve WAF challenge...')
+						await page.goto(probe, wait_until='networkidle')
+						await page.wait_for_timeout(1500)
+					except Exception as e:
+						print(f'[INFO] {account_name}: probe nav failed: {str(e)[:40]}')
 
 				cookies = await page.context.cookies()
 
@@ -314,8 +326,9 @@ async def login_check_in_flow(account: AccountConfig, account_name: str, provide
 	waf_cookies = {}
 	if provider_config.needs_waf_cookies():
 		login_url = f'{provider_config.domain}{provider_config.login_path}'
-		# 传 None 抓取浏览器全部 cookie，最大化 WAF 通过率（不依赖具体 cookie 名）
-		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url, None)
+		# 传 None 抓取浏览器全部 cookie；并额外访问被 WAF 拦的 /api 路径以触发并解出 acw_sc__v2
+		probe = [f'{provider_config.domain}{provider_config.user_info_path}']
+		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url, None, probe_urls=probe)
 		if not waf_cookies:
 			print(f'[FAILED] {account_name}: Unable to get WAF cookies')
 			return False, None, None
