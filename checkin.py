@@ -101,23 +101,24 @@ async def get_waf_cookies_with_playwright(account_name: str, login_url: str, req
 
 				cookies = await page.context.cookies()
 
-				waf_cookies = {}
-				for cookie in cookies:
-					cookie_name = cookie.get('name')
-					cookie_value = cookie.get('value')
-					if cookie_name in required_cookies and cookie_value is not None:
-						waf_cookies[cookie_name] = cookie_value
+				if required_cookies:
+					waf_cookies = {}
+					for cookie in cookies:
+						cookie_name = cookie.get('name')
+						cookie_value = cookie.get('value')
+						if cookie_name in required_cookies and cookie_value is not None:
+							waf_cookies[cookie_name] = cookie_value
 
-				print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies')
+					missing_cookies = [c for c in required_cookies if c not in waf_cookies]
+					if missing_cookies:
+						print(f'[FAILED] {account_name}: Missing WAF cookies: {missing_cookies}')
+						await context.close()
+						return None
+				else:
+					# 登录式签到：抓取浏览器全部 cookie（过 WAF 后整套带给登录请求）
+					waf_cookies = {c.get('name'): c.get('value') for c in cookies if c.get('value') is not None}
 
-				missing_cookies = [c for c in required_cookies if c not in waf_cookies]
-
-				if missing_cookies:
-					print(f'[FAILED] {account_name}: Missing WAF cookies: {missing_cookies}')
-					await context.close()
-					return None
-
-				print(f'[SUCCESS] {account_name}: Successfully got all WAF cookies')
+				print(f'[INFO] {account_name}: Got {len(waf_cookies)} cookies from browser: {sorted(waf_cookies)}')
 
 				await context.close()
 
@@ -313,7 +314,8 @@ async def login_check_in_flow(account: AccountConfig, account_name: str, provide
 	waf_cookies = {}
 	if provider_config.needs_waf_cookies():
 		login_url = f'{provider_config.domain}{provider_config.login_path}'
-		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url, provider_config.waf_cookie_names)
+		# 传 None 抓取浏览器全部 cookie，最大化 WAF 通过率（不依赖具体 cookie 名）
+		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url, None)
 		if not waf_cookies:
 			print(f'[FAILED] {account_name}: Unable to get WAF cookies')
 			return False, None, None

@@ -100,8 +100,8 @@ class AppConfig:
 				login_api_path='/api/user/login',  # 登录即签到：每次登录触发当日签到
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
-				bypass_method=None,  # pilot：登录接口对住宅 IP 无需 WAF 绕过；若 runner 被 WAF 拦再改回 'waf_cookies'
-				waf_cookie_names=None,
+				bypass_method='waf_cookies',  # runner 机房 IP 会被阿里云 WAF 拦，需先用浏览器过 JS 挑战再带 cookie 登录
+				waf_cookie_names=['acw_tc'],  # 占位以保持 bypass 开启；登录流程实际抓取浏览器全部 cookie（见 login_check_in_flow）
 			),
 		}
 
