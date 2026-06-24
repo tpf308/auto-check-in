@@ -5,6 +5,17 @@ __pycache__
 .pytest_cache
 .ruff_cache
 .mypy_cache
+.coverage
+coverage.xml
+htmlcov/
 balance_hash.txt
+accounts.json
+scripts/accounts.json
+scripts/api-sites-accounts.json
+checkin.log
+launcher-error.log
+*.log
+*.updated.json
+*.tmp.json
 
 .DS_Store

@@ -1,0 +1,56 @@
+name: Cloud service check-ins
+
+on:
+  schedule:
+    - cron: '10 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  api-sites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Run Ranmeng and aiapi1 check-ins
+        env:
+          API_SITES_ACCOUNTS: ${{ secrets.API_SITES_ACCOUNTS }}
+        run: python scripts/api_sites_checkin.py
+
+  bmapi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Run BMAPI check-in
+        env:
+          BMAPI_ACCOUNTS: ${{ secrets.BMAPI_ACCOUNTS }}
+          BMAPI_TIMEZONE: Asia/Shanghai
+          BMAPI_WRITE_BACK: '0'
+          BMAPI_UPDATED_ACCOUNTS_FILE: .bmapi_accounts.updated.json
+        run: python scripts/bmapi_checkin.py
+
+      - name: Persist rotated BMAPI token
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "GH_PAT is not configured; skip BMAPI_ACCOUNTS write-back."
+            exit 0
+          fi
+          if [ -s .bmapi_accounts.updated.json ]; then
+            gh secret set BMAPI_ACCOUNTS --repo "$GITHUB_REPOSITORY" < .bmapi_accounts.updated.json
+          fi
