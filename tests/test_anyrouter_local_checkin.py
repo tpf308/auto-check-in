@@ -1,6 +1,6 @@
 import json
 
-from scripts.anyrouter_local_checkin import load_accounts, parse_cookies
+from scripts.anyrouter_local_checkin import is_waf_challenge, load_accounts, parse_cookies
 
 
 def test_parse_cookie_header_string():
@@ -18,3 +18,10 @@ def test_load_accounts_from_local_file_when_env_missing(tmp_path, monkeypatch):
 	accounts = load_accounts(accounts_file)
 
 	assert accounts == [{'name': 'AnyRouter-local', 'cookies': {'session': 'abc'}, 'api_user': '123'}]
+
+
+def test_detects_anyrouter_waf_html_challenge():
+	html = "<html><script>var arg1='ABC';</script></html>"
+
+	assert is_waf_challenge('text/html', html)
+	assert not is_waf_challenge('application/json', html)

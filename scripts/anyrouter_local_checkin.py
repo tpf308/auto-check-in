@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -24,6 +26,7 @@ LOG_FILE = ROOT / 'checkin.log'
 
 BASE_URL = os.getenv('ANYROUTER_BASE_URL', 'https://anyrouter.top').rstrip('/')
 API_USER_HEADER = os.getenv('ANYROUTER_API_USER_HEADER', 'new-api-user')
+BASE_HOST = urlparse(BASE_URL).hostname or 'anyrouter.top'
 
 HEADERS = {
 	'User-Agent': (
@@ -37,6 +40,10 @@ HEADERS = {
 	'Referer': BASE_URL + '/console/personal',
 	'X-Requested-With': 'XMLHttpRequest',
 }
+
+
+class WAFChallengeError(RuntimeError):
+	"""Raised when AnyRouter returns a browser challenge instead of JSON."""
 
 
 def log(handle: Any, message: str) -> None:
@@ -62,6 +69,13 @@ def parse_cookies(cookies: dict[str, Any] | str | None) -> dict[str, str]:
 	return parsed
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+	value = os.getenv(name)
+	if value is None:
+		return default
+	return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 def load_accounts(path: Path = ACCOUNTS_FILE) -> list[dict[str, Any]]:
 	raw = os.getenv('ANYROUTER_ACCOUNTS')
 	if raw:
@@ -82,11 +96,21 @@ def load_accounts(path: Path = ACCOUNTS_FILE) -> list[dict[str, Any]]:
 	return data
 
 
+def is_waf_challenge(content_type: str, text: str) -> bool:
+	if 'json' in content_type:
+		return False
+	lower = text.lower()
+	return '<html' in lower and ('arg1' in lower or 'acw_' in lower or 'waf' in lower or 'cdn_sec' in lower)
+
+
 def read_json(response: httpx.Response) -> dict[str, Any]:
 	content_type = response.headers.get('content-type', '')
 	text = response.text
 	if 'json' not in content_type:
-		raise RuntimeError(f'non-JSON response (HTTP {response.status_code}): {text[:120]!r}')
+		message = f'non-JSON response (HTTP {response.status_code}): {text[:120]!r}'
+		if is_waf_challenge(content_type, text):
+			raise WAFChallengeError(message)
+		raise RuntimeError(message)
 	try:
 		payload = response.json()
 	except json.JSONDecodeError as exc:
@@ -126,12 +150,57 @@ def sign_in(client: httpx.Client, headers: dict[str, str]) -> tuple[bool, str]:
 	return already_checked, message
 
 
-def check_one(account: dict[str, Any]) -> tuple[bool, str]:
-	api_user = str(account.get('api_user') or '')
-	cookies = parse_cookies(account.get('cookies'))
-	if not api_user or not cookies:
-		return False, 'missing api_user/cookies'
+def get_browser_cookies(account_name: str, cookies: dict[str, str], api_user: str) -> dict[str, str]:
+	try:
+		from playwright.sync_api import sync_playwright
+	except Exception as exc:
+		raise RuntimeError('Playwright is required for AnyRouter WAF challenge. Install playwright and chromium.') from exc
 
+	headless = env_bool('ANYROUTER_HEADLESS', default=False)
+	print(f'[PROCESSING] {account_name}: opening browser to pass AnyRouter WAF (headless={headless})')
+	with tempfile.TemporaryDirectory() as temp_dir:
+		with sync_playwright() as p:
+			context = p.chromium.launch_persistent_context(
+				user_data_dir=temp_dir,
+				headless=headless,
+				user_agent=HEADERS['User-Agent'],
+				viewport={'width': 1366, 'height': 768},
+				args=[
+					'--disable-blink-features=AutomationControlled',
+					'--disable-dev-shm-usage',
+					'--disable-web-security',
+					'--disable-features=VizDisplayCompositor',
+				],
+			)
+			try:
+				context.add_cookies(
+					[
+						{
+							'name': name,
+							'value': value,
+							'domain': BASE_HOST,
+							'path': '/',
+							'secure': BASE_URL.startswith('https://'),
+						}
+						for name, value in cookies.items()
+					]
+				)
+				context.set_extra_http_headers({API_USER_HEADER: api_user, 'Accept': HEADERS['Accept']})
+				page = context.new_page()
+
+				for url in (f'{BASE_URL}/login', f'{BASE_URL}/api/user/self', f'{BASE_URL}/api/user/self'):
+					try:
+						page.goto(url, wait_until='networkidle', timeout=45000)
+						page.wait_for_timeout(2500)
+					except Exception as exc:
+						print(f'[INFO] {account_name}: browser probe failed: {str(exc)[:80]}')
+
+				return {c['name']: c['value'] for c in context.cookies(BASE_URL) if c.get('value')}
+			finally:
+				context.close()
+
+
+def check_with_cookies(account_name: str, api_user: str, cookies: dict[str, str]) -> tuple[bool, str]:
 	headers = {**HEADERS, API_USER_HEADER: api_user}
 	with httpx.Client(http2=True, timeout=30, headers=HEADERS, follow_redirects=True) as client:
 		client.cookies.update(cookies)
@@ -141,6 +210,29 @@ def check_one(account: dict[str, Any]) -> tuple[bool, str]:
 
 	detail = f'{message}; {quota_display(after or before)}'
 	return success, detail
+
+
+def check_one(account: dict[str, Any]) -> tuple[bool, str]:
+	api_user = str(account.get('api_user') or '')
+	cookies = parse_cookies(account.get('cookies'))
+	if not api_user or not cookies:
+		return False, 'missing api_user/cookies'
+
+	name = str(account.get('name') or api_user)
+	last_error: Exception | None = None
+	for attempt in range(2):
+		try:
+			return check_with_cookies(name, api_user, cookies)
+		except WAFChallengeError:
+			browser_cookies = get_browser_cookies(name, cookies, api_user)
+			cookies = {**browser_cookies, **cookies}
+			return check_with_cookies(name, api_user, cookies)
+		except httpx.TransportError as exc:
+			last_error = exc
+			if attempt == 0:
+				continue
+			raise
+	raise last_error or RuntimeError('check-in failed')
 
 
 def main() -> int:
