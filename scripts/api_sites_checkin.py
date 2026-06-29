@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Daily check-in for api.ranmeng.icu and aiapi1.cc.cd."""
+"""Daily check-in for api.ranmeng.icu."""
 
 from __future__ import annotations
 
-import http.cookiejar
 import json
 import os
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +25,6 @@ USER_AGENT = (
 
 RANMENG_BASE_URL = os.getenv("RANMENG_BASE_URL", "https://api.ranmeng.icu").rstrip("/")
 RANMENG_API_BASE = f"{RANMENG_BASE_URL}/api/v1"
-AIAPI1_BASE_URL = os.getenv("AIAPI1_BASE_URL", "https://aiapi1.cc.cd").rstrip("/")
 
 
 def log(handle: Any, message: str) -> None:
@@ -134,63 +131,6 @@ class RanmengClient:
         return data if isinstance(data, dict) else {}
 
 
-class AiApi1Client:
-    def __init__(self) -> None:
-        self.user_id = "-1"
-        self.jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
-
-    def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        data = None if body is None else json.dumps(body).encode("utf-8")
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Cache-Control": "no-store",
-            "Content-Type": "application/json",
-            "New-API-User": str(self.user_id),
-            "Origin": AIAPI1_BASE_URL,
-            "Referer": f"{AIAPI1_BASE_URL}/console/personal",
-            "User-Agent": USER_AGENT,
-        }
-        req = urllib.request.Request(f"{AIAPI1_BASE_URL}{path}", data=data, headers=headers, method=method.upper())
-        payload = read_json_response(req, opener=self.opener)
-        if not isinstance(payload, dict):
-            raise RuntimeError("Invalid JSON response.")
-        return payload
-
-    def login(self, username: str, password: str) -> None:
-        payload = self.request("POST", "/api/user/login", {"username": username, "password": password})
-        if not payload.get("success"):
-            raise RuntimeError(payload.get("message") or "Login failed.")
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            raise RuntimeError("Login returned no user data.")
-        if data.get("require_2fa"):
-            raise RuntimeError("Login requires 2FA; unattended check-in cannot continue.")
-        user_id = data.get("id")
-        if user_id is None:
-            raise RuntimeError("Login succeeded but no user id was returned.")
-        self.user_id = str(user_id)
-
-    def checkin_status(self) -> dict[str, Any]:
-        month = datetime.now().strftime("%Y-%m")
-        payload = self.request("GET", f"/api/user/checkin?{urllib.parse.urlencode({'month': month})}")
-        if not payload.get("success"):
-            raise RuntimeError(payload.get("message") or "Failed to get check-in status.")
-        data = payload.get("data")
-        return data if isinstance(data, dict) else {}
-
-    def checkin(self) -> dict[str, Any]:
-        payload = self.request("POST", "/api/user/checkin", {})
-        if not payload.get("success"):
-            message = payload.get("message") or "Check-in failed."
-            if "Turnstile" in str(message):
-                raise RuntimeError("Check-in requires Turnstile verification; unattended check-in cannot continue.")
-            raise RuntimeError(message)
-        data = payload.get("data")
-        return data if isinstance(data, dict) else {}
-
-
 def check_ranmeng(account: dict[str, Any]) -> tuple[bool, str]:
     email = account.get("email")
     password = account.get("password")
@@ -213,26 +153,10 @@ def check_ranmeng(account: dict[str, Any]) -> tuple[bool, str]:
     return True, f"checked in, reward={claimed.get('today_reward') or claimed.get('reward')}, balance={claimed.get('current_balance')}"
 
 
-def check_aiapi1(account: dict[str, Any]) -> tuple[bool, str]:
-    username = account.get("username")
-    password = account.get("password")
-    if not username or not password:
-        return False, "missing username/password"
-    client = AiApi1Client()
-    client.login(str(username), str(password))
-    status = client.checkin_status()
-    stats = status.get("stats") if isinstance(status.get("stats"), dict) else {}
-    if stats.get("checked_in_today"):
-        count = stats.get("checkin_count") or stats.get("total_checkins")
-        return True, f"already checked in, total_quota={stats.get('total_quota')}, count={count}"
-    claimed = client.checkin()
-    return True, f"checked in, quota_awarded={claimed.get('quota_awarded')}"
-
-
 def run_site(handle: Any, site: str, accounts: list[dict[str, Any]]) -> tuple[int, int]:
     if not accounts:
         return 0, 0
-    checker = check_ranmeng if site == "ranmeng" else check_aiapi1
+    checker = check_ranmeng
     ok = 0
     log(handle, f"===== {site}: {len(accounts)} account(s) =====")
     for idx, account in enumerate(accounts):
