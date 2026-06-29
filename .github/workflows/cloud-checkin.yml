@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Run Ranmeng and aiapi1 check-ins
+      - name: Run Ranmeng check-ins
         env:
           API_SITES_ACCOUNTS: ${{ secrets.API_SITES_ACCOUNTS }}
         run: python scripts/api_sites_checkin.py
